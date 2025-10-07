@@ -31,7 +31,9 @@ class CustomLoss(nn.Module):
         # 预先计算数据库X的均值和协方差矩阵 (这是固定的，可以预计算)
         self.mu_X = torch.mean(self.X, dim=0)
         cov_X = torch.cov(self.X.T)
-        self.Sigma_X = cov_X + self.delta * torch.eye(self.X.shape[1], device=self.device)
+        D = cov_X.size(0)
+        ridge_X = (torch.trace(cov_X) / D) * self.delta
+        self.Sigma_X = cov_X + ridge_X * torch.eye(D, device=self.device)
         self.Sigma_X = (self.Sigma_X + self.Sigma_X.T) / 2.0
 
 
@@ -57,7 +59,10 @@ class CustomLoss(nn.Module):
             # 如果 batch size 为 1, 协方差为 0
             cov_theta = torch.zeros((T_q_batch.shape[1], T_q_batch.shape[1]), device=self.device)
 
-        Sigma_theta = cov_theta + self.delta * torch.eye(T_q_batch.shape[1], device=self.device)
+        D = cov_theta.size(0)
+        # 使用 max(self.delta, 1e-4) 防止 delta 过小
+        ridge_theta = (torch.trace(cov_theta) / D) * max(self.delta, 1e-4) 
+        Sigma_theta = cov_theta + ridge_theta * torch.eye(D, device=self.device)
         Sigma_theta = (Sigma_theta + Sigma_theta.T) / 2.0
         
         term_mean = torch.sum((mu_theta - self.mu_X).pow(2))
@@ -92,13 +97,24 @@ class CustomLoss(nn.Module):
             pre_indices_np = self.q_pre_computed['indices'][original_q_index]
             pre_weights = self.q_pre_computed['weights'][original_q_index]
             post_weights = post_weights_batch[i]
+
+            # === 【修改】对权重进行截断和重归一化，提高Sinkhorn稳定性 ===
+            pre_weights = torch.clamp(pre_weights, min=1e-8)
+            pre_weights = pre_weights / pre_weights.sum()
+            post_weights = torch.clamp(post_weights, min=1e-8)
+            post_weights = post_weights / post_weights.sum()
+            # =======================================================
+
             pre_indices = torch.from_numpy(pre_indices_np).long().to(self.device)
-            
             union_indices = torch.unique(torch.cat([pre_indices, post_indices[i]]))
             support_vectors = self.X[union_indices]
+            # === 【修改】对代价矩阵进行归一化 ===
             cost_matrix = torch.cdist(support_vectors, support_vectors).pow(2)
+            scale = cost_matrix.median()
+            cost_matrix = cost_matrix / (scale + 1e-8)
+            # ====================================
+
             map_union = {idx.item(): j for j, idx in enumerate(union_indices)}
-            
             p_m = torch.zeros(len(union_indices), device=self.device)
             q_m_theta = torch.zeros(len(union_indices), device=self.device)
             

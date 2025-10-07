@@ -18,11 +18,11 @@ def main():
     K = 30
     #Softmax函数的温度系数,较小的 TAU 值: 会让 Softmax 的输出变得“尖锐”。
     #相似度得分最高的那个邻居会获得接近 1 的权重，而其他邻居的权重会接近 0。这使得分布更接近于一个“硬”的、只选择最近邻的决策
-    TAU = 0.1
+    TAU = 0.3
     #EPSILON 值越大: 正则化效应越强。这使得最优传输计划 transport_plan 更“分散”，
     #计算过程更快、更稳定，但得到的是一个对真实Wasserstein距离的更模糊的近似。
-    EPSILON = 0.01
-    DELTA = 1e-6
+    EPSILON = 0.05
+    DELTA = 1e-3
     #控制 分布对齐损失 loss_dist 的重要性
     ALPHA = 1.0
     #控制 KNN结构一致性损失 loss_knn 的重要性
@@ -88,7 +88,7 @@ def main():
     # --- 7. 完整的训练循环 ---
     print("\n--- 开始完整的训练循环 ---")
     NUM_EPOCHS = 10  # 训练的总轮数
-    BATCH_SIZE = 32  # 每个批次的大小
+    BATCH_SIZE = 256  # 每个批次的大小
 
     for epoch in range(NUM_EPOCHS):
         # 在每个epoch开始时，打乱数据顺序以增加随机性

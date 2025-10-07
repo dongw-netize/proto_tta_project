@@ -32,15 +32,45 @@ def read_fbin(filename, start_idx=0, chunk_size=None):
         
         return data.reshape(-1, dim)
 
-def differentiable_matrix_sqrt(matrix):
+def differentiable_matrix_sqrt(A: torch.Tensor, eps: float = 1e-6, max_tries: int = 5):
     """
-    PDF:分布级对齐两个高斯分布的闭式公式里，会出现两次“矩阵平方根
-    计算正半定矩阵的矩阵平方根，且该操作是可微分的。
-    原理是利用特征值分解: A = V @ diag(L) @ V.T 
-    则 A^0.5 = V @ diag(L^0.5) @ V.T
+    稳健的 SPD 矩阵平方根：对称化 + 自适应岭 + 双精度 eig + 谱截断 + 失败重试。
+    支持 [..., D, D] 批量。
     """
-    # 协方差矩阵是对称的，可以使用 torch.linalg.eigh
-    eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
-    # 对特征值进行clamp，防止因数值不稳定出现负数
-    sqrt_eigenvalues = torch.sqrt(torch.clamp(eigenvalues, min=0))
-    return eigenvectors @ torch.diag(sqrt_eigenvalues) @ eigenvectors.T
+    # 数值对称化
+    A = 0.5 * (A + A.transpose(-1, -2))
+    D = A.size(-1)
+    # I = torch.eye(D, device=A.device, dtype=A.dtype) # I 未被使用
+
+    # 使用 jitter 进行重试
+    jitter_val = eps
+    for i in range(max_tries):
+        try:
+            # 增加一个小的 jitter 来提高数值稳定性
+            A_jittered = A + jitter_val * torch.eye(D, device=A.device, dtype=A.dtype)
+            # 用双精度做分解更稳
+            evals, evecs = torch.linalg.eigh(A_jittered.to(torch.float64))
+            
+            # 检查是否有负的特征值 (在 jitter 后理论上不应发生，但作为保险)
+            if (evals < 0).any():
+                # print(f"Warning: Negative eigenvalues found on try {i+1}. Clamping.")
+                evals = torch.clamp(evals, min=1e-12)
+
+            sqrt_evals = torch.sqrt(evals)
+            
+            # 将类型转换回来
+            evecs = evecs.to(A.dtype)
+            sqrt_evals = sqrt_evals.to(A.dtype)
+            
+            return (evecs * sqrt_evals.unsqueeze(-2)) @ evecs.transpose(-1, -2)
+        except torch._C._LinAlgError: # 捕获 linalg 错误
+            # 如果分解失败，增加 jitter 后重试
+            jitter_val *= 10.0
+            if i + 1 == max_tries:
+                print("Matrix square root failed after max retries.")
+    
+    # 仍然失败：退化为仅对角近似（极少发生）
+    print("Warning: eigh failed, falling back to diagonal approximation for sqrt.")
+    diag = torch.diagonal(A, dim1=-2, dim2=-1)
+    diag = torch.clamp(diag, min=1e-12)
+    return torch.diag_embed(torch.sqrt(diag))
