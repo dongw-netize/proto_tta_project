@@ -8,6 +8,7 @@ from utils import read_fbin
 from model import MLP
 from loss_function import CustomLoss
 
+
 def main():
     # --- 1. 超参数设置 ---
     DATASET_PATH = 'data/base.1M.fbin'  
@@ -53,11 +54,11 @@ def main():
 
     # --- 3. 构建Faiss索引 ---
     print("正在为数据库X构建Faiss索引...")
-    index = faiss.IndexFlatIP(DIM)
+    index = faiss.IndexFlatL2(DIM)
     if X_numpy.dtype != 'float32':
         X_numpy = X_numpy.astype('float32')
     index.add(X_numpy)
-    print(f"Faiss索引 (Inner Product) 构建完毕，包含 {index.ntotal} 个向量。")
+    print(f"Faiss索引 (L2 Distance) 构建完毕，包含 {index.ntotal} 个向量。")
 
     # --- 4. 预计算映射前的KNN分布 ---
     print("正在为原始查询集Q预计算KNN...")
@@ -65,7 +66,7 @@ def main():
         Q_numpy = Q_numpy.astype('float32')
     #初始查询的相似度分数，和K个最近邻的数据库索引
     pre_scores, pre_indices = index.search(Q_numpy, K)
-    pre_weights_unnorm = np.exp(pre_scores / TAU)
+    pre_weights_unnorm = np.exp(-pre_scores / TAU) #距离越小权重越大，因此要在softmax前取负
     pre_weights = pre_weights_unnorm / pre_weights_unnorm.sum(axis=1, keepdims=True)
     q_data_pre_computed = {
         'indices': pre_indices,

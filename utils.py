@@ -32,11 +32,8 @@ def read_fbin(filename, start_idx=0, chunk_size=None):
         
         return data.reshape(-1, dim)
 
+#计算矩阵平方根 Σ 1/2
 def differentiable_matrix_sqrt(A: torch.Tensor, eps: float = 1e-6, max_tries: int = 5):
-    """
-    稳健的 SPD 矩阵平方根：对称化 + 自适应岭 + 双精度 eig + 谱截断 + 失败重试。
-    支持 [..., D, D] 批量。
-    """
     # 数值对称化
     A = 0.5 * (A + A.transpose(-1, -2))
     D = A.size(-1)
