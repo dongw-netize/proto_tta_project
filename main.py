@@ -11,10 +11,8 @@ from loss_function import CustomLoss
 
 def main():
     # --- 1. 超参数设置 ---
-    DATASET_PATH = 'data/base.1M.fbin'  
-    TOTAL_VECTORS = 1000000
-    QUERY_SIZE = TOTAL_VECTORS // 10
-    DATABASE_SIZE = TOTAL_VECTORS - QUERY_SIZE
+    QUERY_DATASET_PATH = 'data/query.public.100K.fbin'
+    DATABASE_PATH = 'data/base.1M.fbin'
     DIM = 200
     K = 30
     #Softmax函数的温度系数,较小的 TAU 值: 会让 Softmax 的输出变得“尖锐”。
@@ -27,20 +25,23 @@ def main():
     #控制 分布对齐损失 loss_dist 的重要性
     ALPHA = 1.0
     #控制 KNN结构一致性损失 loss_knn 的重要性
-    BETA = 1.0
+    BETA = 100
     #控制 L2正则化项 loss_reg 的强度。loss_reg 的目标: 惩罚模型中过大的参数值，防止模型变得过于复杂而产生过拟合 
     LAMBDA = 0.01
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"使用设备: {DEVICE}")
 
     # --- 2. 数据加载与预处理 ---
-    if not os.path.exists(DATASET_PATH):
-        print(f"错误: 数据集文件 '{DATASET_PATH}' 未找到。请确保数据集路径正确。")
+    if not os.path.exists(QUERY_DATASET_PATH):
+        print(f"错误: 查询数据集文件 '{QUERY_DATASET_PATH}' 未找到。请确保文件路径正确。")
+        return
+    if not os.path.exists(DATABASE_PATH):
+        print(f"错误: 数据库文件 '{DATABASE_PATH}' 未找到。请确保文件路径正确。")
         return
 
-    print("正在从单个文件加载并拆分数据...")
-    Q_numpy = read_fbin(DATASET_PATH, start_idx=0, chunk_size=QUERY_SIZE)
-    X_numpy = read_fbin(DATASET_PATH, start_idx=QUERY_SIZE, chunk_size=DATABASE_SIZE)
+    print("正在加载查询集和数据库...")
+    Q_numpy = read_fbin(QUERY_DATASET_PATH)
+    X_numpy = read_fbin(DATABASE_PATH)
 
     #numpy 数组转成 PyTorch Tensor(张量)，这样才能送进神经网络
     if Q_numpy.shape[1] != DIM:
