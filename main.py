@@ -109,8 +109,8 @@ def main():
 
     # --- 7. 完整的训练循环 ---
     print("\n--- 开始完整的训练循环 ---")
-    NUM_EPOCHS = 10  # 训练的总轮数
-    BATCH_SIZE = 256  # 每个批次的大小
+    NUM_EPOCHS = 200  # 训练的总轮数
+    BATCH_SIZE = 1024  # 每个批次的大小
 
     for epoch in range(start_epoch, NUM_EPOCHS):
         model.train() # 设置为训练模式
@@ -141,7 +141,7 @@ def main():
             
             # 5. 根据梯度，更新模型参数
             optimizer.step()
-
+            epoch_loss_sum += total_loss.item()
             # 打印训练过程中的信息
             if (i // BATCH_SIZE) % 100 == 0:
                 print(f"Epoch [{epoch+1}/{NUM_EPOCHS}], Batch [{i//BATCH_SIZE}], Loss: {total_loss.item():.4f}")
