@@ -30,7 +30,7 @@ def main():
     LAMBDA = 0.0001  #上次0.01
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"使用设备: {DEVICE}")
-     # 【新增】定义检查点和最佳模型路径
+     #定义检查点和最佳模型路径
     CHECKPOINT_DIR = "checkpoints"
     BEST_MODEL_PATH = "best_model.pth"
     os.makedirs(CHECKPOINT_DIR, exist_ok=True) # 自动创建文件夹
@@ -44,8 +44,8 @@ def main():
         return
 
     print("正在加载查询集和数据库...")
-    Q_numpy = read_fbin(QUERY_DATASET_PATH)
-    X_numpy = read_fbin(DATABASE_PATH)
+    Q_numpy = read_fbin(QUERY_DATASET_PATH) #查询集
+    X_numpy = read_fbin(DATABASE_PATH)      #数据集
 
     #numpy 数组转成 PyTorch Tensor(张量)，这样才能送进神经网络
     if Q_numpy.shape[1] != DIM:
@@ -57,20 +57,33 @@ def main():
     print(f"查询集 Q 的形状: {Q.shape}")
     print(f"数据库 X 的形状: {X.shape}")
 
-    # --- 3. 构建Faiss索引 ---
-    print("正在为数据库X构建Faiss索引...")
-    index = faiss.IndexFlatL2(DIM)
+    # --- 3. 构建Faiss索引 (GPU版本) ---
+    print("正在为数据库X构建Faiss GPU索引...")
+    
+    # 1. 创建一个标准的GPU资源对象
+    res = faiss.StandardGpuResources()
+    
+    # 2. 创建一个CPU索引
+    cpu_index = faiss.IndexFlatL2(DIM)
+    
+    # 3. 将CPU索引转换(或“克隆”)到GPU上 (这里使用 GPU 0)
+    # index 变量现在就是一个GPU索引
+    index = faiss.index_cpu_to_gpu(res, 0, cpu_index) 
+
     if X_numpy.dtype != 'float32':
         X_numpy = X_numpy.astype('float32')
+    
+    # 4. 向GPU索引中添加数据
     index.add(X_numpy)
-    print(f"Faiss索引 (L2 Distance) 构建完毕，包含 {index.ntotal} 个向量。")
+    
+    print(f"Faiss GPU索引 (L2 Distance) 构建完毕，包含 {index.ntotal} 个向量。")
 
     # --- 4. 预计算映射前的KNN分布 ---
     print("正在为原始查询集Q预计算KNN...")
     if Q_numpy.dtype != 'float32':
         Q_numpy = Q_numpy.astype('float32')
     #初始查询的相似度分数，和K个最近邻的数据库索引
-    pre_scores, pre_indices = index.search(Q_numpy, K)
+    pre_scores, pre_indices = index.search(Q_numpy, K) #俩二维数组；pre_scores是对应的距离的平方，pre_indices其K个最近邻下标
     pre_weights_unnorm = np.exp(-pre_scores / TAU) #距离越小权重越大，因此要在softmax前取负
     pre_weights = pre_weights_unnorm / pre_weights_unnorm.sum(axis=1, keepdims=True)
     q_data_pre_computed = {
@@ -116,7 +129,7 @@ def main():
         model.train() # 设置为训练模式
         epoch_loss_sum = 0.0
         shuffled_indices = torch.randperm(Q.shape[0])
-        # 【修改】在epoch循环的末尾打印，需要一个变量来存储最后一个batch的损失详情
+        #在epoch循环的末尾打印，需要一个变量来存储最后一个batch的损失详情
         last_batch_details = {}
         
         # 内层循环，遍历所有批次
