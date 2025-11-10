@@ -14,7 +14,7 @@ def main():
     QUERY_DATASET_PATH = 'data/query.public.100K.fbin'
     DATABASE_PATH = 'data/base.1M.fbin'
     DIM = 200
-    K = 30
+    K = 100
     #Softmax函数的温度系数,较小的 TAU 值: 会让 Softmax 的输出变得“尖锐”。
     #相似度得分最高的那个邻居会获得接近 1 的权重，而其他邻居的权重会接近 0。这使得分布更接近于一个“硬”的、只选择最近邻的决策
     TAU = 0.3
@@ -23,9 +23,9 @@ def main():
     EPSILON = 0.05
     DELTA = 1e-3
     #控制 分布对齐损失 loss_dist 的重要性
-    ALPHA = 0
+    ALPHA = 15.0
     #控制 KNN结构一致性损失 loss_knn 的重要性
-    BETA = 50
+    BETA = 1.0
     #控制 L2正则化项 loss_reg 的强度。loss_reg 的目标: 惩罚模型中过大的参数值，防止模型变得过于复杂而产生过拟合 
     LAMBDA = 0.0001  #上次0.01
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'

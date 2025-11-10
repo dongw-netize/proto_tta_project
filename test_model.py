@@ -15,13 +15,13 @@ def run_full_evaluation():
     DATABASE_PATH = 'data/base.1M.fbin'
     MODEL_PATH = 'best_model.pth'
     DIM = 200
-    K = 10
+    K = 100
     # BATCH_SIZE 仅在 GPU 显存不足 (OOM) 时的 Fallback 模式下使用
     BATCH_SIZE = 512      
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     # 您可以把这里改成 "HNSW" 来测试 HNSW
-    INDEX_TYPE = "IVF"  
+    INDEX_TYPE = "HNSW"  
     
     print(f"模型使用设备(仅映射): {DEVICE}")
     print(f"测试索引类型: {INDEX_TYPE}")
