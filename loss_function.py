@@ -2,17 +2,32 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # 确保 F 已导入
+import torch.nn.functional as F
 import numpy as np
-# import ot # <--- 1. 已移除 OT 库
 import warnings
-from utils import differentiable_matrix_sqrt # <--- 确保这个导入存在
-import faiss 
+import faiss
 
-warnings.filterwarnings("ignore", category=UserWarning, message="Input sums are not equal up to tolerance.*")
+# 忽略特定的警告
+warnings.filterwarnings(
+    "ignore", category=UserWarning, message="Input sums are not equal up to tolerance.*"
+)
+
 
 class CustomLoss(nn.Module):
-    def __init__(self, X_data, Q_data_pre_computed, alpha, beta, lamb, K, tau, epsilon, delta, device='cpu'):
+    def __init__(
+        self,
+        X_data,
+        Q_data_pre_computed,
+        alpha,
+        beta,
+        lamb,
+        gamma,  # [新增] Anchor Loss 权重
+        K,
+        tau,
+        epsilon,
+        delta,
+        device="cpu",
+    ):
         """
         初始化总损失函数。
         """
@@ -20,168 +35,162 @@ class CustomLoss(nn.Module):
         self.alpha = alpha
         self.beta = beta
         self.lamb = lamb
+        self.gamma = gamma  # [新增]
         self.K = K
         self.tau = tau
-        self.epsilon = epsilon # <--- 此参数现在未使用
+        self.epsilon = epsilon
         self.delta = delta
         self.device = device
-        
+
+        # 数据库 X (Base)
         self.X = X_data.to(self.device)
+        self.num_database = self.X.shape[0]  # 记录数据库大小
 
-        # --- 【优化 1: 将预计算数据一次性移至GPU】 ---
         # 预先将所有 pre-computed 数据加载到 GPU
-        self.q_pre_computed_weights = Q_data_pre_computed['weights'].to(self.device)
-        self.q_pre_computed_indices = torch.from_numpy(Q_data_pre_computed['indices']).long().to(self.device)
-        # --- 【优化 1 结束】 ---
+        self.q_pre_computed_weights = Q_data_pre_computed["weights"].to(self.device)
+        self.q_pre_computed_indices = (
+            torch.from_numpy(Q_data_pre_computed["indices"]).long().to(self.device)
+        )
 
-        # --- 【预计算数据库X的统计数据】 ---
-        print("正在预计算数据库X的均值和协方差...")
-        self.mu_X = torch.mean(self.X, dim=0)
-        
-        # [cite_start]计算协方差矩阵 (根据PDF [cite: 97])
-        X_centered = self.X - self.mu_X 
-        self.cov_X = (X_centered.T @ X_centered) / self.X.shape[0] + \
-                       self.delta * torch.eye(self.X.shape[1], device=self.device)
-        
-        # 预计算协方差的平方根 (用于 L_dist)
-        self.cov_X_sqrt = differentiable_matrix_sqrt(self.cov_X)
-        print("预计算完成。")
-        # --- 【预计算结束】 ---
-
-    #对应了pdf中最后总损失：λΩ(θ) 惩罚项 [cite: 153]
     def _l2_regularization(self, model):
         """计算模型参数的L2正则化项。"""
         reg_loss = 0.0
         for param in model.parameters():
             reg_loss += torch.sum(param.pow(2))
         return reg_loss / 2.0
-    
-    # 对应了pdf中 的分布级对齐项 L_dist [cite: 106]
-    def _loss_distribution_alignment(self, T_q_batch):
-        """
-        计算映射后查询批次(T_q_batch)与整个数据库(X)之间的
-        高斯-瓦瑟斯坦距离 L_dist。
-        使用批次统计量 (mu_theta_batch, cov_theta_batch) 来估计
-        T(Q) 的全局统计量 (mu_theta, cov_theta [cite: 100, 101])。
-        """
-        
-        # 1. 计算批次的均值和协方差 (估计 mu_theta, cov_theta [cite: 100, 101])
-        mu_theta_batch = torch.mean(T_q_batch, dim=0)
-        
-        T_q_batch_centered = T_q_batch - mu_theta_batch
-        cov_theta_batch = (T_q_batch_centered.T @ T_q_batch_centered) / T_q_batch.shape[0] + \
-                          self.delta * torch.eye(T_q_batch.shape[1], device=self.device)
 
-        # 2. 计算 L_dist (根据PDF [cite: 106] 的公式)
-        
-        # 均值项: ||mu_theta - mu_X||_2^2
-        loss_mean = torch.sum((mu_theta_batch - self.mu_X) ** 2)
-        
-        # 协方差项: Tr(Sigma_theta + Sigma_X - 2 * (Sigma_theta^1/2 * Sigma_X * Sigma_theta^1/2)^1/2)
-        
-        # 计算 Sigma_theta^1/2
-        cov_theta_batch_sqrt = differentiable_matrix_sqrt(cov_theta_batch)
-        
-        # 计算 (...) 内的项: Sigma_theta^1/2 * Sigma_X * Sigma_theta^1/2
-        term_to_sqrt = cov_theta_batch_sqrt @ self.cov_X @ cov_theta_batch_sqrt
-        
-        # 计算 (...) 的 1/2 次方
-        sqrt_term = differentiable_matrix_sqrt(term_to_sqrt)
-        
-        # 计算迹 Tr(...)
-        loss_cov = torch.trace(self.cov_X + cov_theta_batch - 2 * sqrt_term)
-        
-        # 【修复】确保 L_dist (即 W2^2) 永远不会小于 0
-        total_dist_loss = torch.clamp(loss_mean + loss_cov, min=0.0)
-        
-        return total_dist_loss
-    # --- 【方法结束】 ---
+    # --- RBF 核函数 (保持你文件中的版本) ---
+    def _rbf_kernel(self, X, Y, sigma_sq=None):
+        """
+        计算 RBF 核矩阵 K(X, Y) = exp(- ||x - y||^2 / (2 * sigma^2))
+        """
+        # 1. 计算成对欧氏距离平方
+        x_norm = (X**2).sum(1).view(-1, 1)
+        y_norm = (Y**2).sum(1).view(1, -1)
+        dist_sq = x_norm + y_norm - 2.0 * torch.mm(X, Y.t())
+        dist_sq = torch.clamp(dist_sq, min=0)
 
-    
-    # [cite_start]KL散度 (L_kNN 的一种实现) [cite: 115]
+        # 2. 中位数启发式
+        if sigma_sq is None:
+            median_dist = torch.median(dist_sq.detach())
+            sigma_sq = median_dist / 2.0
+            if sigma_sq < 1e-6:
+                sigma_sq = torch.tensor(1.0, device=self.device)
+
+        if not isinstance(sigma_sq, torch.Tensor):
+            sigma_sq = torch.tensor(sigma_sq, device=self.device)
+
+        # 3. 计算核矩阵
+        gamma = 1.0 / (sigma_sq + 1e-8)
+        K_xy = torch.exp(-gamma * dist_sq)
+
+        return K_xy, sigma_sq
+
+    # --- MMD Loss 计算 (保持你文件中的版本) ---
+    def _loss_mmd(self, source, target):
+        """
+        计算 Maximum Mean Discrepancy (MMD)
+        """
+        combined = torch.cat([source, target], dim=0)
+        _, sigma_sq = self._rbf_kernel(combined, combined, sigma_sq=None)
+
+        K_xx, _ = self._rbf_kernel(source, source, sigma_sq=sigma_sq)
+        K_yy, _ = self._rbf_kernel(target, target, sigma_sq=sigma_sq)
+        K_xy, _ = self._rbf_kernel(source, target, sigma_sq=sigma_sq)
+
+        loss = K_xx.mean() + K_yy.mean() - 2 * K_xy.mean()
+        return torch.clamp(loss, min=0.0)
+
+    # --- KNN Consistency Loss (保持不变) ---
     def _loss_knn_consistency(self, T_q_batch, q_indices, faiss_index):
-
         batch_size = T_q_batch.shape[0]
 
-        # 1. KNN 搜索：优先走 GPU-tensor 路线，失败再退回 numpy
+        # 1. KNN 搜索
         T_q_batch_detached = T_q_batch.detach()
         if not T_q_batch_detached.is_contiguous():
             T_q_batch_detached = T_q_batch_detached.contiguous()
 
         try:
-            # 优先尝试：Faiss 直接吃 torch tensor
             post_D, post_I = faiss_index.search(T_q_batch_detached, self.K)
         except Exception as e:
-            # 退回旧方案：cpu().numpy()
-            q_search_numpy = T_q_batch_detached.cpu().numpy().astype('float32')
+            q_search_numpy = T_q_batch_detached.cpu().numpy().astype("float32")
             post_D, post_I = faiss_index.search(q_search_numpy, self.K)
 
-        # 兼容两种返回类型：torch.Tensor 或 numpy.ndarray
         if isinstance(post_I, np.ndarray):
             post_indices = torch.from_numpy(post_I).long().to(self.device)
-        else:  # torch.Tensor
+        else:
             post_indices = post_I.long().to(self.device)
 
-        # [cite_start]2. 计算映射后的权重 [cite: 109, 128]
-        X_neighbors = self.X[post_indices]  # [B, K, D]
-        l2_dist_sq = ((T_q_batch.unsqueeze(1) - X_neighbors) ** 2).sum(dim=-1)  # [B, K]
-        post_weights_batch = torch.softmax(-l2_dist_sq / self.tau, dim=1)        # [B, K]
+        # 2. 计算映射后的权重
+        X_neighbors = self.X[post_indices]
+        l2_dist_sq = ((T_q_batch.unsqueeze(1) - X_neighbors) ** 2).sum(dim=-1)
+        post_weights_batch = torch.softmax(-l2_dist_sq / self.tau, dim=1)
 
         # 3. 逐样本计算 KL
         batch_kl = T_q_batch.new_tensor(0.0)
 
         for i in range(batch_size):
-            # 3.1 映射前 KNN（全部在 GPU 上取）
-            # --- 【关键性能修复：移除 .item()】 ---
-            original_q_index = q_indices[i]  # [快] 只是一个 0 维 GPU 张量
-            # --- 【修复结束】 ---
-            
-            pre_indices_i = self.q_pre_computed_indices[original_q_index]    # [K]
-            pre_weights_i = self.q_pre_computed_weights[original_q_index]    # [K]
+            original_q_index = q_indices[i]
+            pre_indices_i = self.q_pre_computed_indices[original_q_index]
+            pre_weights_i = self.q_pre_computed_weights[original_q_index]
 
-            # 3.2 映射后 KNN
-            post_indices_i = post_indices[i]        # [K]
-            post_weights_i = post_weights_batch[i]  # [K]
+            post_indices_i = post_indices[i]
+            post_weights_i = post_weights_batch[i]
 
-            # 3.3 联合支撑集 U
-            union_indices = torch.unique(torch.cat([pre_indices_i, post_indices_i], dim=0))  # [U]
+            union_indices = torch.unique(
+                torch.cat([pre_indices_i, post_indices_i], dim=0)
+            )
 
-            # 3.4 用布尔矩阵 + matmul 填 p_m, q_m
-            pre_compare  = (union_indices.unsqueeze(1) == pre_indices_i.unsqueeze(0))   # [U, K]
-            post_compare = (union_indices.unsqueeze(1) == post_indices_i.unsqueeze(0))  # [U, K]
+            pre_compare = union_indices.unsqueeze(1) == pre_indices_i.unsqueeze(0)
+            post_compare = union_indices.unsqueeze(1) == post_indices_i.unsqueeze(0)
 
-            p_m = (pre_compare.float()  @ pre_weights_i.unsqueeze(1)).squeeze(-1)   # [U]
-            q_m = (post_compare.float() @ post_weights_i.unsqueeze(1)).squeeze(-1)  # [U]
+            p_m = (pre_compare.float() @ pre_weights_i.unsqueeze(1)).squeeze(-1)
+            q_m = (post_compare.float() @ post_weights_i.unsqueeze(1)).squeeze(-1)
 
-            # 3.5 防止 log(0) + 归一化
-            p_m = torch.clamp(p_m, min=1e-8); p_m = p_m / p_m.sum()
-            q_m = torch.clamp(q_m, min=1e-8); q_m = q_m / q_m.sum()
+            p_m = torch.clamp(p_m, min=1e-8)
+            p_m = p_m / p_m.sum()
+            q_m = torch.clamp(q_m, min=1e-8)
+            q_m = q_m / q_m.sum()
 
-            # [cite_start]3.6 KL(p || q) [cite: 115]
-            kl_i = F.kl_div(q_m.log(), p_m, reduction='sum', log_target=False)
+            kl_i = F.kl_div(q_m.log(), p_m, reduction="sum", log_target=False)
             batch_kl += kl_i
 
         return batch_kl / batch_size
-    
 
     def forward(self, model, q_batch, q_indices, faiss_index):
         """
         计算一个训练batch的总损失。
         """
+        batch_size = q_batch.shape[0]
+
         # 1. 对当前批次的数据进行映射
         T_q_batch = model(q_batch)
-        
-        # 2. 计算分布对齐损失
-        loss_dist = self._loss_distribution_alignment(T_q_batch)
-        
+
+        # 2. 计算 MMD 分布对齐损失 (L_dist)
+        if self.alpha > 0:
+            idx = torch.randint(0, self.num_database, (batch_size,), device=self.device)
+            X_batch = self.X[idx]
+            loss_dist = self._loss_mmd(T_q_batch, X_batch)
+        else:
+            loss_dist = torch.tensor(0.0, device=self.device)
+
         # 3. 计算KNN结构一致性损失
         loss_knn = self._loss_knn_consistency(T_q_batch, q_indices, faiss_index)
-        
-        # 4. 计算L2正则化项
+
+        # 4. 计算L2正则化项 (Model Weights)
         loss_reg = self._l2_regularization(model)
-        
-        # [cite_start]5. 加权求和得到总损失 [cite: 152]
-        total_loss = self.alpha * loss_dist + self.beta * loss_knn + self.lamb * loss_reg
-        
-        # 返回总损失和分项损失（用于打印日志）
-        return total_loss, loss_dist, loss_knn
+
+        # 5. [新增] 计算 Anchor Loss (别跑太远)
+        # 计算 f(q) 和 q 之间的均方误差
+        loss_anchor = torch.mean(torch.sum((T_q_batch - q_batch) ** 2, dim=1))
+
+        # 6. 加权求和得到总损失
+        total_loss = (
+            self.alpha * loss_dist
+            + self.beta * loss_knn
+            + self.lamb * loss_reg
+            + self.gamma * loss_anchor  # [新增]
+        )
+
+        # 返回总损失和分项损失
+        return total_loss, loss_dist, loss_knn, loss_anchor
